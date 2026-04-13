@@ -1,0 +1,8 @@
+services:
+  app:
+    build: .
+    container_name: tg_bot
+    restart: unless-stopped
+    environment:
+      - BOT_API=${BOT_API}
+      - WEATHER_API=${WEATHER_API}
