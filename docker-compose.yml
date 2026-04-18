@@ -3,6 +3,14 @@ services:
     build: .
     container_name: tg_bot
     restart: unless-stopped
+    depends_on:
+      - redis
     environment:
       - BOT_API=${BOT_API}
       - WEATHER_API=${WEATHER_API}
+      - REDIS_ADDR=redis:6379
+  redis:
+    image: redis:latest
+    container_name: redis_app
+    ports:
+      - "6379:6379"

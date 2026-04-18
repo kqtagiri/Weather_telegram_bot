@@ -11,10 +11,13 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 type Weather struct {
@@ -64,6 +67,15 @@ func GetTemp(city, w_api string) (string, *Weather) {
 
 func main() {
 
+	ctx := context.Background()
+
+	RedisAddr := os.Getenv("REDIS_ADDR")
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     RedisAddr,
+		Password: "",
+		DB:       0,
+	})
+
 	bot_api := os.Getenv("BOT_API")
 	w_api := os.Getenv("WEATHER_API")
 	bot, err := tgbotapi.NewBotAPI(bot_api)
@@ -94,7 +106,7 @@ func main() {
 		"idk":  "https://i.pinimg.com/736x/e8/51/55/e851556c794af699afae9095e7e07f58.jpg",
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signal_ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	u := tgbotapi.NewUpdate(0)
@@ -133,8 +145,40 @@ func main() {
 						photo.Caption = text
 						bot.Send(photo)
 					} else {
+						var text string
+						var w *Weather
 						index := "calm"
-						text, w := GetTemp(update.Message.Text, w_api)
+						check := 1
+						if exists, _ := rdb.Exists(ctx, strings.ToLower(update.Message.Text)).Result(); exists == 1 {
+							check = 0
+							data, err := rdb.Get(ctx, update.Message.Text).Bytes()
+							if err == redis.Nil {
+								slog.Warn(err.Error())
+								text = fmt.Sprint("Не найден город с таким названием!")
+							} else if err != nil {
+								slog.Error(err.Error())
+								check = 1
+							} else {
+								if err := json.Unmarshal(data, &w); err != nil {
+									slog.Error(err.Error())
+								} else {
+									text = fmt.Sprintf("Прогноз погоды в %s следующий:\n\tТемпература: %f\n\tОщущается как: %f\n\tСкорость ветра: %f", w.Name, w.Main.Temp, w.Main.FeelsLike, w.Wind.Speed)
+								}
+							}
+						}
+						if check == 1 {
+							text, w = GetTemp(update.Message.Text, w_api)
+							if w != nil {
+								data, err := json.Marshal(&w)
+								if err != nil {
+									slog.Error(err.Error())
+								} else if err := rdb.Set(ctx, strings.ToLower(update.Message.Text), data, 300*time.Second).Err(); err != nil {
+									slog.Error(err.Error())
+								} else {
+									slog.Info("Weather cached success %s", update.Message.Text)
+								}
+							}
+						}
 						if w == nil {
 							index = "idk"
 						} else if w.Wind.Speed > 10 {
@@ -163,7 +207,7 @@ func main() {
 		for update := range updates {
 
 			select {
-			case <-ctx.Done():
+			case <-signal_ctx.Done():
 				break
 			default:
 				tasks <- update
@@ -172,7 +216,7 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	<-signal_ctx.Done()
 	close(tasks)
 	fmt.Println("wait until workers are working")
 	wg.Wait()
